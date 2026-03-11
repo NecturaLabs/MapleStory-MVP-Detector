@@ -6,6 +6,9 @@
  * Message protocol (main → worker):
  *   { type: 'init' }
  *   { type: 'process', id, rgba, width, height, useV2, useUpscale }
+ *   { type: 'detectChatRegion', id, rgba, width, height }
+ *   { type: 'setChatRegion', rect }
+ *   { type: 'clearChatRegion' }
  *   { type: 'restart' }
  *   { type: 'terminate' }
  *
@@ -16,6 +19,7 @@
  *   { type: 'log', level, cat, msg, data? }
  *   { type: 'stats', recognitionCount, restartCount, heapUsedMB }
  *   { type: 'restarting', reason }
+ *   { type: 'chatRegionResult', id, rect }
  */
 
 /// <reference types="vite/client" />
@@ -29,6 +33,13 @@ interface OcrLine {
   text: string;
   confidence: number;
   bbox?: { x: number; y: number; w: number; h: number };
+}
+
+export interface ChatRect {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
 }
 
 interface ProcessMessage {
@@ -45,6 +56,8 @@ interface ProcessMessage {
 type InboundMessage =
   | { type: 'init' }
   | ProcessMessage
+  | { type: 'setChatRegion'; rect: ChatRect | null }
+  | { type: 'clearChatRegion' }
   | { type: 'restart' }
   | { type: 'terminate' };
 
@@ -241,6 +254,29 @@ function postStats() {
 }
 
 // ---------------------------------------------------------------------------
+// Chat region auto-detection
+// ---------------------------------------------------------------------------
+
+let chatRegion: ChatRect | null = null;
+
+/**
+ * Crop RGBA pixel data to a sub-rectangle.
+ */
+function cropRgbaData(
+  src: Uint8ClampedArray,
+  srcWidth: number,
+  rect: ChatRect,
+): { data: Uint8ClampedArray; width: number; height: number } {
+  const dst = new Uint8ClampedArray(rect.w * rect.h * 4);
+  for (let row = 0; row < rect.h; row++) {
+    const srcOff = ((rect.y + row) * srcWidth + rect.x) * 4;
+    dst.set(src.subarray(srcOff, srcOff + rect.w * 4), row * rect.w * 4);
+  }
+  return { data: dst, width: rect.w, height: rect.h };
+}
+
+
+// ---------------------------------------------------------------------------
 // OpenCV filter pipelines — 1:1 port of OcrServiceBase.cs
 // All cv.Mat objects are explicitly deleted to prevent WASM heap leak.
 // ---------------------------------------------------------------------------
@@ -342,45 +378,36 @@ function applyFiltersRaw(src: any): any {
 }
 
 /**
- * Convert cv.Mat (grayscale or RGBA) to TIFF ArrayBuffer for Tesseract.
- * UTIF is imported once and cached for subsequent calls.
+ * Convert a filtered cv.Mat (grayscale or RGBA) to an OffscreenCanvas for Tesseract.
+ *
+ * Tesseract.js v7 does NOT support ImageData — it was temporarily added then reverted.
+ * OffscreenCanvas is the correct Worker-compatible format: tesseract.js calls
+ * canvas.convertToBlob() internally to produce a PNG that Leptonica can read.
  */
-let _utif: any = null;
-async function matToTiffBuffer(mat: any): Promise<ArrayBuffer> {
-  const channels = mat.channels();
+function matToOffscreenCanvas(mat: any): OffscreenCanvas {
   const width = mat.cols;
   const height = mat.rows;
-
-  let rgba: Uint8Array;
+  const channels = mat.channels();
+  const rgba = new Uint8ClampedArray(width * height * 4);
 
   if (channels === 1) {
-    // Grayscale — expand to RGBA for UTIF
-    const grayData = mat.data;
-    rgba = new Uint8Array(width * height * 4);
-    for (let i = 0, j = 0; i < grayData.length; i++, j += 4) {
-      const v = grayData[i];
+    // Grayscale — expand to RGBA for ImageData / putImageData
+    const gray = mat.data as Uint8Array;
+    for (let i = 0, j = 0; i < gray.length; i++, j += 4) {
+      const v = gray[i];
       rgba[j] = v;
       rgba[j + 1] = v;
       rgba[j + 2] = v;
       rgba[j + 3] = 255;
     }
   } else {
-    rgba = new Uint8Array(mat.data);
+    rgba.set(mat.data);
   }
 
-  // Cache the UTIF module after first import
-  if (!_utif) {
-    // @ts-expect-error — utif has no type declarations
-    const mod = await import('utif');
-    _utif = mod.default || mod;
-  }
-
-  // Encode to TIFF at 300 DPI — Tesseract works best at 300 DPI.
-  return _utif.encodeImage(rgba.buffer, width, height, {
-    t282: [300],
-    t283: [300],
-    t296: [2],
-  }) as ArrayBuffer;
+  const canvas = new OffscreenCanvas(width, height);
+  const ctx = canvas.getContext('2d')!;
+  ctx.putImageData(new ImageData(rgba, width, height), 0, 0);
+  return canvas;
 }
 
 // ---------------------------------------------------------------------------
@@ -398,25 +425,33 @@ async function processImage(
   await ensureOpenCV();
   await ensureTesseract();
 
-  // Optional 2× nearest-neighbor upscale via OffscreenCanvas (cv.resize not available)
+  // Crop to detected chat region first (before upscale — keeps upscale efficient)
   let pixelData = new Uint8ClampedArray(rgba);
   let imgWidth = width;
   let imgHeight = height;
 
-  if (useUpscale) {
-    const srcCanvas = new OffscreenCanvas(width, height);
-    const srcCtx = srcCanvas.getContext('2d')!;
-    srcCtx.putImageData(new ImageData(pixelData, width, height), 0, 0);
+  if (chatRegion) {
+    const cropped = cropRgbaData(pixelData, imgWidth, chatRegion);
+    pixelData = cropped.data as Uint8ClampedArray<ArrayBuffer>;
+    imgWidth = cropped.width;
+    imgHeight = cropped.height;
+  }
 
-    const dstWidth = width * 2;
-    const dstHeight = height * 2;
+  // Optional 2× nearest-neighbor upscale via OffscreenCanvas (on the cropped region)
+  if (useUpscale) {
+    const srcCanvas = new OffscreenCanvas(imgWidth, imgHeight);
+    const srcCtx = srcCanvas.getContext('2d')!;
+    srcCtx.putImageData(new ImageData(pixelData, imgWidth, imgHeight), 0, 0);
+
+    const dstWidth = imgWidth * 2;
+    const dstHeight = imgHeight * 2;
     const dstCanvas = new OffscreenCanvas(dstWidth, dstHeight);
     const dstCtx = dstCanvas.getContext('2d')!;
     dstCtx.imageSmoothingEnabled = false; // nearest-neighbor
     dstCtx.drawImage(srcCanvas, 0, 0, dstWidth, dstHeight);
 
     const upscaled = dstCtx.getImageData(0, 0, dstWidth, dstHeight);
-    pixelData = upscaled.data;
+    pixelData = upscaled.data as unknown as Uint8ClampedArray<ArrayBuffer>;
     imgWidth = dstWidth;
     imgHeight = dstHeight;
   }
@@ -433,22 +468,22 @@ async function processImage(
   }
 
   // Defensive: applyFilters returned null/undefined without throwing (should not happen in practice).
-  // Fail explicitly rather than passing an invalid Mat to TIFF encoding.
   if (!filtered) throw new Error('Filter pipeline produced no output');
 
-  // Convert filtered image to TIFF for Tesseract
-  let tiffBuffer: ArrayBuffer;
-  try {
-    tiffBuffer = await matToTiffBuffer(filtered);
-  } finally {
-    filtered.delete();
-  }
+  // Convert filtered Mat to OffscreenCanvas for Tesseract.
+  // ImageData is NOT supported in tesseract.js v7 (support was reverted).
+  // OffscreenCanvas is the correct Worker-compatible format — tesseract.js calls
+  // canvas.convertToBlob() → PNG internally, which Leptonica can decode.
+  // user_defined_dpi: '300' matches the DPI we previously embedded in TIFF headers,
+  // ensuring Tesseract's font-size heuristics stay calibrated for small game text.
+  const canvas = matToOffscreenCanvas(filtered);
+  filtered.delete();
 
-  // Run Tesseract recognition on the TIFF buffer
+  // Run Tesseract recognition
   // PSM 6 = assume a single uniform block of text (best for chat regions)
   const result = await tessWorker!.recognize(
-    new Uint8Array(tiffBuffer),
-    { tessedit_pageseg_mode: '6' },
+    canvas,
+    { tessedit_pageseg_mode: '6', user_defined_dpi: '300' },
     { blocks: true },
   );
   const lines: OcrLine[] = [];
@@ -522,6 +557,17 @@ self.onmessage = async (e: MessageEvent<InboundMessage>) => {
           await restartTesseract(`error during processing: ${err.message}`);
         } catch { /* best effort */ }
       }
+      break;
+    }
+
+
+    case 'setChatRegion': {
+      chatRegion = msg.rect;
+      break;
+    }
+
+    case 'clearChatRegion': {
+      chatRegion = null;
       break;
     }
 

@@ -30,6 +30,8 @@ export interface AppSettings {
   discordRoleId: string;
   // Experimental
   vlmEnabled: boolean;
+  // Chat region crop (percentages 0–1, relative to video frame)
+  chatRegion: { xPct: number; yPct: number; wPct: number; hPct: number } | null;
 }
 
 interface MvpCode {
@@ -68,6 +70,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   discordWebhookUrl: '',
   discordRoleId: '',
   vlmEnabled: false,
+  chatRegion: null,
 };
 
 export function loadSettings(): AppSettings {

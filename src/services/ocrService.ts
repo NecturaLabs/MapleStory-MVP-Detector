@@ -7,12 +7,20 @@
  * - Timeout per request (10s) — on timeout, restarts worker, resolves with []
  * - Memory-pressure restarts delegated to worker internals
  * - Debug log callback for ring buffer integration
+ * - Chat region auto-detection: detect once on capture start, restore after restarts
  */
 
 export interface OcrLine {
   text: string;
   confidence: number;
   bbox?: { x: number; y: number; w: number; h: number };
+}
+
+export interface ChatRect {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
 }
 
 export interface WorkerStats {
@@ -34,14 +42,18 @@ let recreating = false; // guard against concurrent recreateWorker calls
 let logCallback: LogCallback = () => {};
 let latestStats: WorkerStats = { recognitionCount: 0, restartCount: 0, heapUsedMB: 0 };
 
+// Last known chat region — restored into new workers after restart
+let lastChatRect: ChatRect | null = null;
+
 // Promise queue — ensures only one recognition is in-flight at a time
 let queueTail: Promise<void> = Promise.resolve();
 
-// Pending request callbacks keyed by request id
+// Pending OCR request callbacks keyed by request id
 const pending = new Map<number, {
   resolve: (lines: OcrLine[]) => void;
   timer: ReturnType<typeof setTimeout>;
 }>();
+
 
 const REQUEST_TIMEOUT_MS = 30_000;
 
@@ -84,6 +96,7 @@ function createWorkerInstance(): Worker {
         }
         break;
       }
+
 
       case 'log':
         logCallback(msg.level, msg.cat, msg.msg, msg.data);
@@ -139,7 +152,6 @@ async function recreateWorker(): Promise<void> {
       p.resolve([]); // resolve with empty to avoid breaking pipeline
       pending.delete(id);
     }
-
     if (worker) {
       try { worker.terminate(); } catch { /* ignore */ }
       worker = null;
@@ -178,6 +190,10 @@ export async function initOcr(): Promise<void> {
       const onReady = (e: MessageEvent) => {
         if (e.data.type === 'ready') {
           worker!.removeEventListener('message', onReady);
+          // Restore chat region in the new worker if we had one
+          if (lastChatRect) {
+            worker!.postMessage({ type: 'setChatRegion', rect: lastChatRect });
+          }
           resolve();
         }
       };
@@ -270,6 +286,23 @@ export function recognizeFrame(
   });
 
   return result;
+}
+
+/**
+ * Manually override the chat region (e.g. from a saved setting or UI drag).
+ * Pass null to clear and fall back to full-frame processing.
+ */
+export function setChatRegion(rect: ChatRect | null): void {
+  lastChatRect = rect;
+  worker?.postMessage({ type: 'setChatRegion', rect });
+}
+
+/**
+ * Clear the stored chat region — next OCR calls will process the full frame.
+ */
+export function clearChatRegion(): void {
+  lastChatRect = null;
+  worker?.postMessage({ type: 'clearChatRegion' });
 }
 
 /**

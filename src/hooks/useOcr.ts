@@ -13,7 +13,7 @@
 
 import { useEffect, useRef, useCallback } from 'react';
 import useAppStore from '../store/appStore.ts';
-import { initOcr, recognizeFrame, terminateOcr, setLogCallback } from '../services/ocrService.ts';
+import { initOcr, recognizeFrame, terminateOcr, setLogCallback, setChatRegion, clearChatRegion } from '../services/ocrService.ts';
 import type { OcrLine } from '../services/ocrService.ts';
 import {
   initOnnx,
@@ -729,4 +729,22 @@ export function useOcr(videoRef: React.RefObject<HTMLVideoElement | null>) {
     window.addEventListener('beforeunload', onUnload);
     return () => { window.removeEventListener('beforeunload', onUnload); };
   }, []);
+
+  // Sync the user-defined chat region (from settings) into the OCR worker.
+  // Runs when capturing starts or when the user changes the crop region.
+  // Converts percentage-based storage to pixel coordinates using the video dimensions.
+  useEffect(() => {
+    const video = videoRef.current;
+    const region = settings.chatRegion;
+    if (region && video && video.videoWidth && video.videoHeight) {
+      setChatRegion({
+        x: Math.round(region.xPct * video.videoWidth),
+        y: Math.round(region.yPct * video.videoHeight),
+        w: Math.round(region.wPct * video.videoWidth),
+        h: Math.round(region.hPct * video.videoHeight),
+      });
+    } else {
+      clearChatRegion();
+    }
+  }, [settings.chatRegion, isCapturing, videoRef]);
 }
