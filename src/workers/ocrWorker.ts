@@ -5,8 +5,7 @@
  *
  * Message protocol (main → worker):
  *   { type: 'init' }
- *   { type: 'process', id, rgba, width, height, useV2, useUpscale }
- *   { type: 'detectChatRegion', id, rgba, width, height }
+ *   { type: 'process', id, rgba, width, height, useUpscale, useMultiFilter }
  *   { type: 'setChatRegion', rect }
  *   { type: 'clearChatRegion' }
  *   { type: 'restart' }
@@ -14,12 +13,11 @@
  *
  * Message protocol (worker → main):
  *   { type: 'ready' }
- *   { type: 'result', id, lines: { text, confidence }[] }
+ *   { type: 'result', id, v2Lines, rawLines }
  *   { type: 'error', id, message }
  *   { type: 'log', level, cat, msg, data? }
  *   { type: 'stats', recognitionCount, restartCount, heapUsedMB }
  *   { type: 'restarting', reason }
- *   { type: 'chatRegionResult', id, rect }
  */
 
 /// <reference types="vite/client" />
@@ -48,9 +46,8 @@ interface ProcessMessage {
   rgba: ArrayBuffer;
   width: number;
   height: number;
-  useV2: boolean;
   useUpscale: boolean;
-  useRaw?: boolean; // if true, skip threshold filtering (grayscale + border only)
+  useMultiFilter: boolean;
 }
 
 type InboundMessage =
@@ -150,47 +147,61 @@ async function ensureOpenCV(): Promise<void> {
 }
 
 // ---------------------------------------------------------------------------
-// Tesseract worker (embedded in this web worker)
+// Tesseract workers (embedded in this web worker)
+// tessWorker  — V2 filter pass (always used)
+// tessWorker2 — Raw filter pass (used when useMultiFilter=true)
+// Both are initialized eagerly so they're warm before capture starts.
+// Running both recognize() calls concurrently on separate workers gives true
+// parallelism since each is its own nested worker on a separate OS thread.
 // ---------------------------------------------------------------------------
 
-let tessWorker: any = null;
-let tessReady = false;
+let tessWorker: any  = null;
+let tessWorker2: any = null;
+let tessReady  = false;
+let tessReady2 = false;
 let tessRestarting = false; // guard against concurrent restarts
 
-async function ensureTesseract(): Promise<void> {
-  if (tessReady && tessWorker) return;
-  log('info', 'TESS', 'Importing tesseract.js...');
+async function createTessWorkerInstance(): Promise<any> {
   const { createWorker } = await import('tesseract.js');
-
   // Load eng model from app's own public/ directory (not CDN).
   // langPath must NOT have a trailing slash — tesseract.js appends /{lang}.traineddata.gz itself.
-  // Use BASE_URL (Vite's base path, e.g. "/" or "/subpath") so this works for subpath deployments.
   const langPath = self.location.origin + (import.meta.env.BASE_URL || '/').replace(/\/$/, '');
-  log('info', 'TESS', `Creating Tesseract worker with langPath=${langPath}`);
-  try {
-    tessWorker = await createWorker(
-      'eng',
-      1, // OEM 1 = LSTM_ONLY
-      {
-        langPath,
-        // Self-host the worker script to avoid importScripts from a nested blob
-        // worker, which browsers block under CSP even when the CDN is whitelisted.
-        workerPath: `${self.location.origin}/tesseract/worker.min.js`,
-        workerBlobURL: false,
-        // gzip: true is the default — fetches eng.traineddata.gz and decompresses in-browser
-      },
-      {
-        load_system_dawg: '0',
-        load_freq_dawg: '0',
-      },
-    );
-    log('info', 'TESS', 'Tesseract worker created successfully');
-  } catch (err: unknown) {
-    const msg = err instanceof Error ? err.message : String(err);
-    log('error', 'TESS', `Tesseract worker creation FAILED: ${msg}`);
-    throw err;
-  }
-  tessReady = true;
+  return createWorker(
+    'eng',
+    1, // OEM 1 = LSTM_ONLY
+    {
+      langPath,
+      // Self-host the worker script to avoid importScripts from a nested blob
+      // worker, which browsers block under CSP even when the CDN is whitelisted.
+      workerPath: `${self.location.origin}/tesseract/worker.min.js`,
+      workerBlobURL: false,
+    },
+    {
+      load_system_dawg: '0',
+      load_freq_dawg: '0',
+    },
+  );
+}
+
+async function ensureTesseract(): Promise<void> {
+  if (tessReady && tessWorker && tessReady2 && tessWorker2) return;
+
+  log('info', 'TESS', 'Initializing Tesseract workers (parallel)…');
+
+  // Init both workers concurrently — they share cached WASM + traineddata
+  // so concurrent init ≈ the same wall-clock time as a single init.
+  const [w1, w2] = await Promise.all([
+    (!tessReady || !tessWorker)
+      ? createTessWorkerInstance()
+      : Promise.resolve(tessWorker),
+    (!tessReady2 || !tessWorker2)
+      ? createTessWorkerInstance()
+      : Promise.resolve(tessWorker2),
+  ]);
+
+  tessWorker  = w1; tessReady  = true;
+  tessWorker2 = w2; tessReady2 = true;
+  log('info', 'TESS', 'Both Tesseract workers ready');
 }
 
 async function restartTesseract(reason: string): Promise<void> {
@@ -203,11 +214,14 @@ async function restartTesseract(reason: string): Promise<void> {
     self.postMessage({ type: 'restarting', reason });
     restartCount++;
 
-    if (tessWorker) {
-      try { await tessWorker.terminate(); } catch { /* ignore */ }
-      tessWorker = null;
-      tessReady = false;
-    }
+    // Terminate both workers in parallel
+    await Promise.all([
+      tessWorker  ? tessWorker.terminate().catch(() => {})  : Promise.resolve(),
+      tessWorker2 ? tessWorker2.terminate().catch(() => {}) : Promise.resolve(),
+    ]);
+    tessWorker = null; tessWorker2 = null;
+    tessReady  = false; tessReady2  = false;
+
     await ensureTesseract();
   } finally {
     tessRestarting = false;
@@ -225,12 +239,11 @@ const RESTART_EVERY_N = 50; // restart Tesseract every N recognitions as prevent
 const HEAP_LIMIT_MB = 512; // restart if WASM heap exceeds this
 
 function getHeapUsedMB(): number {
-  // performance.memory is Chrome-only, non-standard
   const perf = self.performance as any;
   if (perf?.memory) {
     return Math.round(perf.memory.usedJSHeapSize / (1024 * 1024));
   }
-  return 0; // unknown
+  return 0;
 }
 
 function shouldRestart(): string | null {
@@ -254,7 +267,7 @@ function postStats() {
 }
 
 // ---------------------------------------------------------------------------
-// Chat region auto-detection
+// Chat region
 // ---------------------------------------------------------------------------
 
 let chatRegion: ChatRect | null = null;
@@ -274,7 +287,6 @@ function cropRgbaData(
   }
   return { data: dst, width: rect.w, height: rect.h };
 }
-
 
 // ---------------------------------------------------------------------------
 // OpenCV filter pipelines — 1:1 port of OcrServiceBase.cs
@@ -327,39 +339,10 @@ function applyFiltersV2(src: any): any {
 }
 
 /**
- * V1 Pipeline (fallback):
- * 1. bitwiseNot
- * 2. cvtColor BGR2GRAY
- * 3. threshold(210, 230, BINARY)
- * 4. copyMakeBorder(10, 10, 10, 10, white)
- */
-function applyFiltersV1(src: any): any {
-  const inverted = new cv.Mat();
-  const gray = new cv.Mat();
-  const threshed = new cv.Mat();
-  let bordered: any = null;
-  try {
-    bordered = new cv.Mat();
-    cv.bitwise_not(src, inverted);
-    cv.cvtColor(inverted, gray, cv.COLOR_RGBA2GRAY);
-    cv.threshold(gray, threshed, 210, 230, cv.THRESH_BINARY);
-    cv.copyMakeBorder(threshed, bordered, 10, 10, 10, 10, cv.BORDER_CONSTANT, new cv.Scalar(255));
-    return bordered;
-  } catch (e) {
-    bordered?.delete();
-    throw e;
-  } finally {
-    inverted.delete(); gray.delete(); threshed.delete();
-  }
-}
-
-/**
  * Raw Pipeline (unfiltered grayscale):
  * Converts to grayscale and adds a 20px white border — no thresholding.
  * Best for colored chat text (orange item drops, green GL messages)
- * that V1/V2 miss due to threshold constraints.
- * 1. cvtColor RGBA2GRAY
- * 2. copyMakeBorder(20px white)
+ * that V2 misses due to threshold constraints.
  */
 function applyFiltersRaw(src: any): any {
   const gray = new cv.Mat();
@@ -377,37 +360,104 @@ function applyFiltersRaw(src: any): any {
   }
 }
 
-/**
- * Convert a filtered cv.Mat (grayscale or RGBA) to an OffscreenCanvas for Tesseract.
- *
- * Tesseract.js v7 does NOT support ImageData — it was temporarily added then reverted.
- * OffscreenCanvas is the correct Worker-compatible format: tesseract.js calls
- * canvas.convertToBlob() internally to produce a PNG that Leptonica can read.
- */
-function matToOffscreenCanvas(mat: any): OffscreenCanvas {
-  const width = mat.cols;
-  const height = mat.rows;
-  const channels = mat.channels();
-  const rgba = new Uint8ClampedArray(width * height * 4);
+// ---------------------------------------------------------------------------
+// BMP encoding — synchronous alternative to OffscreenCanvas → convertToBlob()
+//
+// Tesseract.js v7 accepts Uint8Array image data. Passing a BMP avoids the
+// async OffscreenCanvas.convertToBlob() call that was adding ~100-500ms per
+// pass. Leptonica reads BMP in microseconds (no decompression needed).
+// DPI is encoded in the BMP header so user_defined_dpi is not required.
+// ---------------------------------------------------------------------------
 
-  if (channels === 1) {
-    // Grayscale — expand to RGBA for ImageData / putImageData
-    const gray = mat.data as Uint8Array;
-    for (let i = 0, j = 0; i < gray.length; i++, j += 4) {
-      const v = gray[i];
-      rgba[j] = v;
-      rgba[j + 1] = v;
-      rgba[j + 2] = v;
-      rgba[j + 3] = 255;
-    }
-  } else {
-    rgba.set(mat.data);
+/**
+ * Convert a single-channel (grayscale) cv.Mat to an 8-bit BMP Uint8Array.
+ * BMP is uncompressed: Leptonica reads it with a memcpy, no decode overhead.
+ * 300 DPI is encoded in the BITMAPINFOHEADER (11811 pixels/meter).
+ */
+function matToBmpBuffer(mat: any): Uint8Array {
+  const w = mat.cols;
+  const h = mat.rows;
+  const gray = mat.data as Uint8Array; // single-channel after filtering
+
+  const FILE_HDR  = 14;
+  const DIB_HDR   = 40;
+  const PALETTE   = 256 * 4;          // 256 grayscale RGBQUAD entries
+  const rowStride = (w + 3) & ~3;     // each row padded to multiple of 4 bytes
+  const pixBytes  = rowStride * h;
+  const total     = FILE_HDR + DIB_HDR + PALETTE + pixBytes;
+
+  const buf = new Uint8Array(total);   // zero-initialized
+  const dv  = new DataView(buf.buffer);
+
+  // ── BITMAPFILEHEADER ──
+  buf[0] = 0x42; buf[1] = 0x4D;       // 'BM'
+  dv.setUint32(2,  total,                       true); // bfSize
+  // bfReserved1 + bfReserved2 = 0 (already zero)
+  dv.setUint32(10, FILE_HDR + DIB_HDR + PALETTE, true); // bfOffBits
+
+  // ── BITMAPINFOHEADER ──
+  dv.setUint32(14, DIB_HDR, true); // biSize
+  dv.setInt32 (18, w,       true); // biWidth
+  dv.setInt32 (22, -h,      true); // biHeight (negative → top-down, no row reversal needed)
+  dv.setUint16(26, 1,       true); // biPlanes
+  dv.setUint16(28, 8,       true); // biBitCount (8-bit palette)
+  // biCompression = 0 (BI_RGB, already zero)
+  dv.setUint32(34, pixBytes, true); // biSizeImage
+  dv.setInt32 (38, 11811,   true); // biXPelsPerMeter (300 DPI = 300/0.0254 ≈ 11811)
+  dv.setInt32 (42, 11811,   true); // biYPelsPerMeter
+  dv.setUint32(46, 256,     true); // biClrUsed
+  // biClrImportant = 0 (already zero)
+
+  // ── Grayscale color table ──
+  const pOff = FILE_HDR + DIB_HDR;
+  for (let i = 0; i < 256; i++) {
+    const o = pOff + i * 4;
+    buf[o] = buf[o + 1] = buf[o + 2] = i; // R=G=B=i, reserved=0
   }
 
-  const canvas = new OffscreenCanvas(width, height);
-  const ctx = canvas.getContext('2d')!;
-  ctx.putImageData(new ImageData(rgba, width, height), 0, 0);
-  return canvas;
+  // ── Pixel data (top-down rows, each padded to rowStride) ──
+  const dOff = pOff + PALETTE;
+  if (rowStride === w) {
+    buf.set(gray, dOff); // no padding — direct copy
+  } else {
+    for (let r = 0; r < h; r++) {
+      buf.set(gray.subarray(r * w, r * w + w), dOff + r * rowStride);
+    }
+  }
+
+  return buf;
+}
+
+// ---------------------------------------------------------------------------
+// Result parsing
+// ---------------------------------------------------------------------------
+
+function parseOcrResult(result: any): OcrLine[] {
+  if (!result?.data?.blocks) return [];
+  const lines: OcrLine[] = [];
+  for (const block of result.data.blocks) {
+    if (!block.paragraphs) continue;
+    for (const para of block.paragraphs) {
+      if (!para.lines) continue;
+      for (const line of para.lines) {
+        const text = (line.text || '')
+          .replace(/\n$/, '')
+          .replace(/[|]+\s*$/, '')  // strip trailing | (OCR artifact from chat border)
+          .replace(/^[|lIJBb}\]]{1,3}\s*(?=\[?\d)/, '')  // strip 1-3 leading border misreads before [timestamp]
+          .replace(/\b(xx\s?[:.,;]\s?)(\d{2})\d+/gi, '$1$2')  // normalise xx:4515 → xx:45
+          .trim();
+        if (text && text.replace(/[^a-zA-Z0-9]/g, '').length >= 4) {
+          const b = line.bbox;
+          lines.push({
+            text,
+            confidence: line.confidence ?? 0,
+            ...(b ? { bbox: { x: b.x0, y: b.y0, w: b.x1 - b.x0, h: b.y1 - b.y0 } } : {}),
+          });
+        }
+      }
+    }
+  }
+  return lines;
 }
 
 // ---------------------------------------------------------------------------
@@ -418,111 +468,97 @@ async function processImage(
   rgba: ArrayBuffer,
   width: number,
   height: number,
-  useV2: boolean,
   useUpscale: boolean,
-  useRaw = false,
-): Promise<OcrLine[]> {
+  useMultiFilter: boolean,
+): Promise<{ v2Lines: OcrLine[]; rawLines: OcrLine[] }> {
   await ensureOpenCV();
   await ensureTesseract();
 
-  // Crop to detected chat region first (before upscale — keeps upscale efficient)
+  // Crop to user-defined chat region first (before upscale — keeps upscale efficient)
   let pixelData = new Uint8ClampedArray(rgba);
-  let imgWidth = width;
+  let imgWidth  = width;
   let imgHeight = height;
 
   if (chatRegion) {
     const cropped = cropRgbaData(pixelData, imgWidth, chatRegion);
     pixelData = cropped.data as Uint8ClampedArray<ArrayBuffer>;
-    imgWidth = cropped.width;
+    imgWidth  = cropped.width;
     imgHeight = cropped.height;
   }
 
-  // Optional 2× nearest-neighbor upscale via OffscreenCanvas (on the cropped region)
+  // Optional 2× nearest-neighbor upscale (on the cropped region)
   if (useUpscale) {
     const srcCanvas = new OffscreenCanvas(imgWidth, imgHeight);
-    const srcCtx = srcCanvas.getContext('2d')!;
-    srcCtx.putImageData(new ImageData(pixelData, imgWidth, imgHeight), 0, 0);
+    srcCanvas.getContext('2d')!.putImageData(new ImageData(pixelData, imgWidth, imgHeight), 0, 0);
 
-    const dstWidth = imgWidth * 2;
-    const dstHeight = imgHeight * 2;
-    const dstCanvas = new OffscreenCanvas(dstWidth, dstHeight);
+    const dstW = imgWidth * 2;
+    const dstH = imgHeight * 2;
+    const dstCanvas = new OffscreenCanvas(dstW, dstH);
     const dstCtx = dstCanvas.getContext('2d')!;
     dstCtx.imageSmoothingEnabled = false; // nearest-neighbor
-    dstCtx.drawImage(srcCanvas, 0, 0, dstWidth, dstHeight);
+    dstCtx.drawImage(srcCanvas, 0, 0, dstW, dstH);
 
-    const upscaled = dstCtx.getImageData(0, 0, dstWidth, dstHeight);
+    const upscaled = dstCtx.getImageData(0, 0, dstW, dstH);
     pixelData = upscaled.data as unknown as Uint8ClampedArray<ArrayBuffer>;
-    imgWidth = dstWidth;
-    imgHeight = dstHeight;
+    imgWidth  = dstW;
+    imgHeight = dstH;
   }
 
-  // Create cv.Mat from RGBA pixels
+  // Create cv.Mat from RGBA pixels (shared source for both filter passes)
   const src = cv.matFromImageData({ data: pixelData, width: imgWidth, height: imgHeight });
 
-  // Apply filter pipeline
-  let filtered: any;
+  // Apply V2 filter → BMP (synchronous, no PNG encoding overhead)
+  let filteredV2: any;
   try {
-    filtered = useRaw ? applyFiltersRaw(src) : (useV2 ? applyFiltersV2(src) : applyFiltersV1(src));
-  } finally {
+    filteredV2 = applyFiltersV2(src);
+  } catch (e) {
     src.delete();
+    throw e;
   }
+  const bmpV2 = matToBmpBuffer(filteredV2);
+  filteredV2.delete();
 
-  // Defensive: applyFilters returned null/undefined without throwing (should not happen in practice).
-  if (!filtered) throw new Error('Filter pipeline produced no output');
-
-  // Convert filtered Mat to OffscreenCanvas for Tesseract.
-  // ImageData is NOT supported in tesseract.js v7 (support was reverted).
-  // OffscreenCanvas is the correct Worker-compatible format — tesseract.js calls
-  // canvas.convertToBlob() → PNG internally, which Leptonica can decode.
-  // user_defined_dpi: '300' matches the DPI we previously embedded in TIFF headers,
-  // ensuring Tesseract's font-size heuristics stay calibrated for small game text.
-  const canvas = matToOffscreenCanvas(filtered);
-  filtered.delete();
-
-  // Run Tesseract recognition
-  // PSM 6 = assume a single uniform block of text (best for chat regions)
-  const result = await tessWorker!.recognize(
-    canvas,
-    { tessedit_pageseg_mode: '6', user_defined_dpi: '300' },
-    { blocks: true },
-  );
-  const lines: OcrLine[] = [];
-  if (result.data.blocks) {
-    for (const block of result.data.blocks) {
-      if (!block.paragraphs) continue;
-      for (const para of block.paragraphs) {
-        if (!para.lines) continue;
-        for (const line of para.lines) {
-          const text = (line.text || '')
-            .replace(/\n$/, '')
-            .replace(/[|]+\s*$/, '')  // strip trailing | (OCR artifact from chat border)
-            .replace(/^[|lIJBb}\]]{1,3}\s*(?=\[?\d)/, '')  // strip 1-3 leading border misreads before [timestamp]
-            .replace(/\b(xx\s?[:.,;]\s?)(\d{2})\d+/gi, '$1$2')  // normalise xx:4515 → xx:45 (OCR merges tokens)
-            .trim();
-          // Skip micro-fragments (< 4 alphanumeric chars) — OCR noise like "ars]" or "I"
-          if (text && text.replace(/[^a-zA-Z0-9]/g, '').length >= 4) {
-            const b = line.bbox;
-            lines.push({
-              text,
-              confidence: line.confidence ?? 0,
-              ...(b ? { bbox: { x: b.x0, y: b.y0, w: b.x1 - b.x0, h: b.y1 - b.y0 } } : {}),
-            });
-          }
-        }
-      }
+  // Apply Raw filter → BMP (only when useMultiFilter)
+  let bmpRaw: Uint8Array | null = null;
+  if (useMultiFilter) {
+    let filteredRaw: any;
+    try {
+      filteredRaw = applyFiltersRaw(src);
+    } catch (e) {
+      src.delete();
+      throw e;
     }
+    bmpRaw = matToBmpBuffer(filteredRaw);
+    filteredRaw.delete();
   }
 
-  recognitionCount++;
+  src.delete();
 
-  // Check if we need a preventive restart
+  // Run both recognitions concurrently — tessWorker and tessWorker2 are separate
+  // nested workers (each on its own OS thread), so this gives true parallelism.
+  // Total wall-clock time = max(V2, Raw) instead of V2 + Raw.
+  const tessOptions = { tessedit_pageseg_mode: '6' }; // DPI embedded in BMP header
+  const tessOutput  = { blocks: true };
+
+  const [v2Result, rawResult] = await Promise.all([
+    tessWorker!.recognize(bmpV2, tessOptions, tessOutput),
+    bmpRaw ? tessWorker2!.recognize(bmpRaw, tessOptions, tessOutput) : Promise.resolve(null),
+  ]);
+
+  // Count recognitions (2 if multiFilter, 1 otherwise) for restart scheduling
+  recognitionCount += useMultiFilter ? 2 : 1;
+
   const reason = shouldRestart();
   if (reason) {
     await restartTesseract(reason);
   }
 
   postStats();
-  return lines;
+
+  return {
+    v2Lines:  parseOcrResult(v2Result),
+    rawLines: rawResult ? parseOcrResult(rawResult) : [],
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -545,21 +581,18 @@ self.onmessage = async (e: MessageEvent<InboundMessage>) => {
     }
 
     case 'process': {
-      const { id, rgba, width, height, useV2, useUpscale, useRaw = false } = msg;
+      const { id, rgba, width, height, useUpscale, useMultiFilter } = msg;
       try {
-        const lines = await processImage(rgba, width, height, useV2, useUpscale, useRaw);
-        self.postMessage({ type: 'result', id, lines });
+        const { v2Lines, rawLines } = await processImage(rgba, width, height, useUpscale, useMultiFilter);
+        self.postMessage({ type: 'result', id, v2Lines, rawLines });
       } catch (err: any) {
         self.postMessage({ type: 'error', id, message: err.message });
-
-        // Restart on any processing error
         try {
           await restartTesseract(`error during processing: ${err.message}`);
         } catch { /* best effort */ }
       }
       break;
     }
-
 
     case 'setChatRegion': {
       chatRegion = msg.rect;
@@ -572,23 +605,19 @@ self.onmessage = async (e: MessageEvent<InboundMessage>) => {
     }
 
     case 'restart': {
-      if (tessWorker) {
-        try { await tessWorker.terminate(); } catch { /* ignore */ }
-        tessWorker = null;
-        tessReady = false;
-      }
-      // OpenCV WASM can't be cleanly unloaded, but terminating the worker
-      // (self.close()) will reclaim all memory
+      if (tessWorker)  { try { await tessWorker.terminate();  } catch { /* ignore */ } }
+      if (tessWorker2) { try { await tessWorker2.terminate(); } catch { /* ignore */ } }
+      tessWorker = null; tessWorker2 = null;
+      tessReady  = false; tessReady2  = false;
       self.close();
       break;
     }
 
     case 'terminate': {
-      if (tessWorker) {
-        try { await tessWorker.terminate(); } catch { /* ignore */ }
-        tessWorker = null;
-        tessReady = false;
-      }
+      if (tessWorker)  { try { await tessWorker.terminate();  } catch { /* ignore */ } }
+      if (tessWorker2) { try { await tessWorker2.terminate(); } catch { /* ignore */ } }
+      tessWorker = null; tessWorker2 = null;
+      tessReady  = false; tessReady2  = false;
       self.close();
       break;
     }

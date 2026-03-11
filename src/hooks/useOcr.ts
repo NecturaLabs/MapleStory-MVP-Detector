@@ -14,7 +14,6 @@
 import { useEffect, useRef, useCallback } from 'react';
 import useAppStore from '../store/appStore.ts';
 import { initOcr, recognizeFrame, terminateOcr, setLogCallback, setChatRegion, clearChatRegion } from '../services/ocrService.ts';
-import type { OcrLine } from '../services/ocrService.ts';
 import {
   initOnnx,
   dispatchFrame,
@@ -302,13 +301,14 @@ export function useOcr(videoRef: React.RefObject<HTMLVideoElement | null>) {
       await workerRestartPromiseRef.current;
       if (genRef.current !== myGen) return;
 
-      // 2. Send to worker for V2 filter + OCR (primary)
-      const v2Lines = await recognizeFrame(
+      // 2. Send to worker — V2 (primary) and Raw (colored text) passes run concurrently
+      //    inside the worker, so we pay max(V2, Raw) time instead of V2 + Raw.
+      const { v2Lines, rawLines } = await recognizeFrame(
         rawFrame.data,
         rawFrame.width,
         rawFrame.height,
-        true, // useV2
         s.useUpscale,
+        s.useMultiFilter,
       );
 
       // Generation guard
@@ -320,33 +320,13 @@ export function useOcr(videoRef: React.RefObject<HTMLVideoElement | null>) {
 
       let usedFilter: 'v1' | 'v2' | 'raw' = 'v2';
 
-      // 4. Supplementary raw pass: run unfiltered grayscale OCR to catch colored
-      //    chat text (orange item drops, green GL messages) that V2's thresholding misses.
-      //    V2 results are always kept. Raw results are merged in (dedup handles overlaps).
-      let rawLines: OcrLine[] = [];
-      if (s.useMultiFilter) {
-        // Generation guard
-        if (genRef.current !== myGen) return;
-
-        rawLines = await recognizeFrame(
-          rawFrame.data,
-          rawFrame.width,
-          rawFrame.height,
-          false,  // useV2 (ignored when useRaw=true)
-          s.useUpscale,
-          true,   // useRaw
-        );
-
-        if (genRef.current !== myGen) return;
-
+      // 4. Merge Raw results — catch colored chat text (orange item drops, green GL messages)
+      //    that V2's thresholding misses. Dedup handles overlaps.
+      if (rawLines.length > 0) {
         const rawMessages = combineLines(rawLines, s);
         const rawResults = rawMessages.map((m) => ({ msg: m, mvp: analyzeMvp(m.text, s) }));
-
-        // Append raw results — dedup logic downstream handles duplicates
-        if (rawResults.length > 0) {
-          results = results.concat(rawResults);
-          usedFilter = 'raw'; // indicate both filters ran
-        }
+        results = results.concat(rawResults);
+        usedFilter = 'raw';
       }
 
       const duration = Math.round(performance.now() - startTime);

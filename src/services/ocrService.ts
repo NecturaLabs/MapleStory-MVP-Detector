@@ -4,10 +4,10 @@
  *
  * Features:
  * - Promise queue: requests are serialized, no messages dropped
- * - Timeout per request (10s) — on timeout, restarts worker, resolves with []
+ * - Timeout per request (30s) — on timeout, restarts worker, resolves with empty result
  * - Memory-pressure restarts delegated to worker internals
  * - Debug log callback for ring buffer integration
- * - Chat region auto-detection: detect once on capture start, restore after restarts
+ * - Chat region stored here for restoration after worker restarts
  */
 
 export interface OcrLine {
@@ -50,7 +50,7 @@ let queueTail: Promise<void> = Promise.resolve();
 
 // Pending OCR request callbacks keyed by request id
 const pending = new Map<number, {
-  resolve: (lines: OcrLine[]) => void;
+  resolve: (result: { v2Lines: OcrLine[]; rawLines: OcrLine[] }) => void;
   timer: ReturnType<typeof setTimeout>;
 }>();
 
@@ -80,7 +80,7 @@ function createWorkerInstance(): Worker {
         if (p) {
           clearTimeout(p.timer);
           pending.delete(msg.id);
-          p.resolve(msg.lines);
+          p.resolve({ v2Lines: msg.v2Lines ?? [], rawLines: msg.rawLines ?? [] });
         }
         break;
       }
@@ -90,9 +90,9 @@ function createWorkerInstance(): Worker {
         if (p) {
           clearTimeout(p.timer);
           pending.delete(msg.id);
-          // On error, resolve with empty array (don't break the pipeline)
+          // On error, resolve with empty result (don't break the pipeline)
           logCallback('error', 'WORKER', `Worker error id=${msg.id}: ${msg.message}`);
-          p.resolve([]);
+          p.resolve({ v2Lines: [], rawLines: [] });
         }
         break;
       }
@@ -149,7 +149,7 @@ async function recreateWorker(): Promise<void> {
     // Reject all pending requests
     for (const [id, p] of pending) {
       clearTimeout(p.timer);
-      p.resolve([]); // resolve with empty to avoid breaking pipeline
+      p.resolve(EMPTY_RESULT); // resolve with empty to avoid breaking pipeline
       pending.delete(id);
     }
     if (worker) {
@@ -221,32 +221,34 @@ export async function initOcr(): Promise<void> {
   return initPromise;
 }
 
+const EMPTY_RESULT = { v2Lines: [] as OcrLine[], rawLines: [] as OcrLine[] };
+
 /**
  * Run OCR on RGBA pixel data. Requests are serialized (queued, no drops).
+ * Both the V2 (primary) and Raw (colored text) filter passes run concurrently
+ * inside the worker, so total time ≈ max(V2, Raw) instead of V2 + Raw.
  *
- * @param rgba       RGBA pixel data (Uint8ClampedArray from ImageData.data)
- * @param width      Image width
- * @param height     Image height
- * @param useV2      Use V2 filter pipeline (primary), false = V1 fallback
- * @param useUpscale 2× nearest-neighbor upscale before filtering (recommended)
- * @param useRaw     Skip threshold filtering — grayscale + border only (best for colored text)
- * @returns          Array of OCR lines
+ * @param rgba          RGBA pixel data (Uint8ClampedArray from ImageData.data)
+ * @param width         Image width
+ * @param height        Image height
+ * @param useUpscale    2× nearest-neighbor upscale before filtering
+ * @param useMultiFilter Run the Raw (unfiltered grayscale) pass in parallel with V2
+ * @returns             { v2Lines, rawLines }
  */
 export function recognizeFrame(
   rgba: Uint8ClampedArray,
   width: number,
   height: number,
-  useV2: boolean,
   useUpscale: boolean,
-  useRaw = false,
-): Promise<OcrLine[]> {
-  // Chain onto queue tail — ensures serial execution, no drops
-  const result = new Promise<OcrLine[]>((outerResolve) => {
+  useMultiFilter: boolean,
+): Promise<{ v2Lines: OcrLine[]; rawLines: OcrLine[] }> {
+  // Chain onto queue tail — ensures serial execution at the service level, no drops
+  const result = new Promise<{ v2Lines: OcrLine[]; rawLines: OcrLine[] }>((outerResolve) => {
     queueTail = queueTail.then(() => {
       return new Promise<void>((doneWithSlot) => {
         if (!worker) {
           logCallback('warn', 'OCR', 'Worker not initialized, returning empty');
-          outerResolve([]);
+          outerResolve(EMPTY_RESULT);
           doneWithSlot();
           return;
         }
@@ -262,7 +264,7 @@ export function recognizeFrame(
         const timer = setTimeout(async () => {
           logCallback('error', 'OCR', `Request ${id} timed out after ${REQUEST_TIMEOUT_MS}ms`);
           pending.delete(id);
-          outerResolve([]);
+          outerResolve(EMPTY_RESULT);
           doneWithSlot();
 
           // Recreate worker on timeout
@@ -270,15 +272,15 @@ export function recognizeFrame(
         }, REQUEST_TIMEOUT_MS);
 
         pending.set(id, {
-          resolve: (lines) => {
-            outerResolve(lines);
+          resolve: (res) => {
+            outerResolve(res);
             doneWithSlot();
           },
           timer,
         });
 
         worker.postMessage(
-          { type: 'process', id, rgba: buf, width, height, useV2, useUpscale, useRaw },
+          { type: 'process', id, rgba: buf, width, height, useUpscale, useMultiFilter },
           [buf], // transfer ownership
         );
       });
@@ -320,7 +322,7 @@ export async function terminateOcr(): Promise<void> {
     // Reject all pending requests
     for (const [, p] of pending) {
       clearTimeout(p.timer);
-      p.resolve([]);
+      p.resolve(EMPTY_RESULT);
     }
     pending.clear();
 
