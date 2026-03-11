@@ -4,6 +4,14 @@
   "description": "MapleStory MVP Detector — real-time chat OCR for MVP announcements",
   "license": "MIT",
   "type": "module",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/NecturaLabs/MapleStory-MVP-Detector.git"
+  },
+  "homepage": "https://app.ms-mvp.com",
+  "bugs": {
+    "url": "https://github.com/NecturaLabs/MapleStory-MVP-Detector/issues"
+  },
   "scripts": {
     "dev": "vite",
     "prebuild": "node scripts/download-tessdata.js",

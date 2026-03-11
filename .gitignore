@@ -19,6 +19,9 @@ vite.config.js
 # Internal implementation plans
 docs/plans/
 
+# Agent/AI coding assistant context (internal dev guidance)
+AGENTS.md
+
 # Test fixtures (user-provided, not committed — see README for setup)
 TEST-SUBJECT.tiff
 src/services/__fixtures__/golden/*.tiff
