@@ -35,6 +35,7 @@ const SETTINGS: AppSettings = {
   discordRoleId: '',
   vlmEnabled: false,
   showMvpOnly: false,
+  chatRegion: null,
 };
 
 // ---------------------------------------------------------------------------
