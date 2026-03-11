@@ -1,0 +1,49 @@
+# Sync bun.lock on Dependabot PRs
+#
+# Dependabot updates package.json but doesn't know about bun.lock.
+# This workflow runs bun install and commits the updated lockfile
+# so CI's --frozen-lockfile check passes.
+
+name: Sync bun.lock
+
+on:
+  pull_request:
+    paths:
+      - package.json
+
+permissions:
+  contents: write
+  actions: write
+
+jobs:
+  sync-lockfile:
+    name: Sync bun.lock
+    if: github.actor == 'dependabot[bot]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.head_ref }}
+          fetch-depth: 1
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: oven-sh/setup-bun@v2
+
+      - name: Update bun.lock
+        run: bun install --no-frozen-lockfile
+
+      - name: Commit updated lockfile
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          if git diff --quiet bun.lock 2>/dev/null; then
+            echo "bun.lock is already up to date"
+          else
+            git add bun.lock
+            git commit -m "chore: sync bun.lock"
+            git push
+            gh workflow run ci.yml --ref "${{ github.head_ref }}"
+          fi
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

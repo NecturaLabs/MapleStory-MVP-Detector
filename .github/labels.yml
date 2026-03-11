@@ -1,0 +1,34 @@
+# Label definitions for MapleStory MVP Detector
+# Synced via EndBug/label-sync — edit this file, not GitHub UI
+
+- name: bug
+  color: "#d73a4a"
+  description: "Something isn't working"
+
+- name: enhancement
+  color: "#a2eeef"
+  description: "New feature or request"
+
+- name: documentation
+  color: "#0075ca"
+  description: "Improvements or additions to documentation"
+
+- name: "good first issue"
+  color: "#7057ff"
+  description: "Good for newcomers"
+
+- name: "help wanted"
+  color: "#008672"
+  description: "Extra attention is needed"
+
+- name: dependencies
+  color: "#0075ca"
+  description: "Dependency updates from Dependabot"
+
+- name: npm
+  color: "#e4e669"
+  description: "npm dependency updates from Dependabot"
+
+- name: github-actions
+  color: "#5a67d8"
+  description: "GitHub Actions updates from Dependabot"

@@ -1,0 +1,26 @@
+node_modules/
+dist/
+.env
+.env.local
+*.local
+
+# Legacy JS files superseded by TypeScript
+src/**/*.js
+src/**/*.jsx
+vite.config.js
+nul
+
+# Tesseract trained data (downloaded at build time, not committed)
+*.traineddata
+*.traineddata.gz
+
+# Git worktrees
+.worktrees/
+
+# Internal implementation plans
+docs/plans/
+
+# Test fixtures (user-provided, not committed — see README for setup)
+TEST-SUBJECT.tiff
+src/services/__fixtures__/golden/*.tiff
+src/services/__fixtures__/golden/*.json
