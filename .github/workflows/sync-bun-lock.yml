@@ -11,15 +11,16 @@ on:
     paths:
       - package.json
 
-permissions:
-  contents: write
-  actions: write
+permissions: {}
 
 jobs:
   sync-lockfile:
     name: Sync bun.lock
     if: github.actor == 'dependabot[bot]'
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      actions: write
     timeout-minutes: 3
     steps:
       - uses: actions/checkout@v6

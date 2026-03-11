@@ -1,0 +1,3 @@
+# Require @Nectura approval on all pull requests.
+# Dependabot PRs are auto-approved by the dependabot-auto-merge workflow.
+* @Nectura
