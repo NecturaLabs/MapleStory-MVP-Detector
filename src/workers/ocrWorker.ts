@@ -67,24 +67,19 @@ async function ensureOpenCV(): Promise<void> {
   if (cvReady) return;
 
   // We can't use importScripts in a module worker (Vite uses type:'module').
-  // Wrap the UMD script in an IIFE bound to `self` and import it as a blob
-  // module URL. This avoids `new Function()` so the CSP doesn't need unsafe-eval.
+  // Instead, fetch the 225KB patched opencv.js and evaluate it via new Function,
+  // binding `self` as `this` so the UMD wrapper's `root.cv = factory()` works.
+  // This requires 'unsafe-eval' in the CSP, which is acceptable for a client-side
+  // OCR tool — there's no alternative for loading UMD scripts in module workers.
   const w = self as any;
 
   const resp = await fetch('/opencv.js');
   if (!resp.ok) throw new Error(`Failed to fetch /opencv.js: ${resp.status}`);
   const scriptText = await resp.text();
 
-  const blob = new Blob(
-    ['(function(){', scriptText, '}).call(self);'],
-    { type: 'text/javascript' },
-  );
-  const blobUrl = URL.createObjectURL(blob);
-  try {
-    await import(/* @vite-ignore */ blobUrl);
-  } finally {
-    URL.revokeObjectURL(blobUrl);
-  }
+  // eslint-disable-next-line no-new-func
+  const run = new Function(scriptText);
+  run.call(w);
 
   const mod = w.cv;
   if (!mod) {
