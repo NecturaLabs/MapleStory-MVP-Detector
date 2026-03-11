@@ -1,3 +1,6 @@
+# The authoritative source for Netlify headers is public/_headers,
+# which Vite copies to dist/_headers at build time.
+
 [build]
   command = "bun install --frozen-lockfile && bun run build"
   publish = "dist"
@@ -7,29 +10,3 @@
   from = "/*"
   to = "/index.html"
   status = 200
-
-# Cache Vite hashed assets forever
-[[headers]]
-  for = "/assets/*"
-  [headers.values]
-    Cache-Control = "public, max-age=31536000, immutable"
-
-# Serve tessdata as raw binary — must NOT have Content-Encoding: gzip set by
-# the CDN/browser, because tesseract.js decompresses it manually in the worker.
-[[headers]]
-  for = "/eng.traineddata.gz"
-  [headers.values]
-    Content-Type = "application/octet-stream"
-    Cache-Control = "public, max-age=86400"
-
-# Security + COOP/COEP headers (COOP/COEP required for SharedArrayBuffer used by OpenCV WASM)
-[[headers]]
-  for = "/*"
-  [headers.values]
-    X-Frame-Options = "DENY"
-    X-Content-Type-Options = "nosniff"
-    Referrer-Policy = "strict-origin-when-cross-origin"
-    Permissions-Policy = "camera=(), microphone=(), geolocation=()"
-    Strict-Transport-Security = "max-age=63072000; includeSubDomains; preload"
-    Cross-Origin-Opener-Policy = "same-origin"
-    Cross-Origin-Embedder-Policy = "credentialless"
