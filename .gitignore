@@ -8,7 +8,6 @@ dist/
 src/**/*.js
 src/**/*.jsx
 vite.config.js
-nul
 
 # Tesseract trained data (downloaded at build time, not committed)
 *.traineddata
