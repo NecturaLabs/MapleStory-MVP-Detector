@@ -343,11 +343,10 @@ function applyFiltersRaw(src: any): any {
 
 /**
  * Convert cv.Mat (grayscale or RGBA) to TIFF ArrayBuffer for Tesseract.
- * We encode to TIFF via UTIF so Tesseract's Leptonica backend gets
- * its preferred format — matching the C# pipeline exactly.
+ * UTIF is imported once and cached for subsequent calls.
  */
+let _utif: any = null;
 async function matToTiffBuffer(mat: any): Promise<ArrayBuffer> {
-  // Get raw pixel data from the Mat
   const channels = mat.channels();
   const width = mat.cols;
   const height = mat.rows;
@@ -366,21 +365,22 @@ async function matToTiffBuffer(mat: any): Promise<ArrayBuffer> {
       rgba[j + 3] = 255;
     }
   } else {
-    // Already RGBA (4-channel)
     rgba = new Uint8Array(mat.data);
   }
 
-  // Encode to TIFF using UTIF, setting 300 DPI — Tesseract works best at 300 DPI.
-  // UTIF IFD tags: t282=XResolution, t283=YResolution, t296=ResolutionUnit (2=inches)
-  // @ts-expect-error — utif has no type declarations
-  const UTIF = await import('utif');
-  const utif = UTIF.default || UTIF;
-  const tiffBuf = utif.encodeImage(rgba.buffer, width, height, {
+  // Cache the UTIF module after first import
+  if (!_utif) {
+    // @ts-expect-error — utif has no type declarations
+    const mod = await import('utif');
+    _utif = mod.default || mod;
+  }
+
+  // Encode to TIFF at 300 DPI — Tesseract works best at 300 DPI.
+  return _utif.encodeImage(rgba.buffer, width, height, {
     t282: [300],
     t283: [300],
     t296: [2],
   }) as ArrayBuffer;
-  return tiffBuf;
 }
 
 // ---------------------------------------------------------------------------
@@ -426,7 +426,6 @@ async function processImage(
 
   // Apply filter pipeline
   let filtered: any;
-  const pipelineName = useRaw ? 'raw' : (useV2 ? 'V2' : 'V1');
   try {
     filtered = useRaw ? applyFiltersRaw(src) : (useV2 ? applyFiltersV2(src) : applyFiltersV1(src));
   } finally {
@@ -452,8 +451,6 @@ async function processImage(
     { tessedit_pageseg_mode: '6' },
     { blocks: true },
   );
-  const pipeline = `${pipelineName}${useUpscale ? ' 2×' : ''}`;
-
   const lines: OcrLine[] = [];
   if (result.data.blocks) {
     for (const block of result.data.blocks) {
@@ -480,8 +477,6 @@ async function processImage(
       }
     }
   }
-
-  log('info', 'PROC', `OCR(${pipeline}) ${width}x${height} → ${lines.length} lines`);
 
   recognitionCount++;
 
