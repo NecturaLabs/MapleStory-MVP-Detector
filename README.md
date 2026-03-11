@@ -1,3 +1,6 @@
+[![CI](https://github.com/NecturaLabs/MapleStory-MVP-Detector/actions/workflows/ci.yml/badge.svg)](https://github.com/NecturaLabs/MapleStory-MVP-Detector/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
 # MapleStory MVP Detector
 
 Real-time MapleStory MVP announcement detector. Captures your game window via the browser Screen Capture API, OCRs the chat region using OpenCV.js (WASM) + Tesseract.js, and alerts you when MVP announcements are detected.
@@ -202,7 +205,7 @@ The build automatically downloads the Tesseract LSTM model (`eng.traineddata.gz`
 
 The included `netlify.toml` handles:
 - Build command and publish directory
-- Security headers (CSP, HSTS, X-Frame-Options)
+- Security headers (HSTS, X-Frame-Options, X-Content-Type-Options)
 - COOP/COEP headers for SharedArrayBuffer (required by OpenCV WASM)
 - SPA fallback routing
 - Asset caching
