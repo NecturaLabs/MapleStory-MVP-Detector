@@ -160,6 +160,10 @@ async function ensureTesseract(): Promise<void> {
       1, // OEM 1 = LSTM_ONLY
       {
         langPath,
+        // Self-host the worker script to avoid importScripts from a nested blob
+        // worker, which browsers block under CSP even when the CDN is whitelisted.
+        workerPath: `${self.location.origin}/tesseract/worker.min.js`,
+        workerBlobURL: false,
         // gzip: true is the default — fetches eng.traineddata.gz and decompresses in-browser
       },
       {
