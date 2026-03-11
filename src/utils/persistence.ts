@@ -10,13 +10,6 @@
 
 export interface AppSettings {
   pollingInterval: number;
-  useMultiFilter: boolean;
-  useUpscale: boolean;
-  searchKeywords: string[];
-  exclusionKeywords: string[];
-  replacementKeywords: string[];
-  maxChannel: number;
-  minConfidence: number;
   maxMessages: number;
   autoCleanup: boolean;
   soundEnabled: boolean;
@@ -53,13 +46,6 @@ const MVP_CODE_EXPIRY_MS = 30 * 60 * 1000; // 30 minutes
 
 export const DEFAULT_SETTINGS: AppSettings = {
   pollingInterval: 2000,
-  useMultiFilter: true,
-  useUpscale: true,
-  searchKeywords: ['mvp', 'alicias blessing', 'certified wellness tonic'],
-  exclusionKeywords: ['superpower', 'exp coupon', 'any mvp', 'pls mvp', 'plz mvp', 'please mvp'],
-  replacementKeywords: ['mvp red', 'be mvp', 'x1 coupon', 'effect x1'],
-  maxChannel: 40,
-  minConfidence: 30,
   maxMessages: 500,
   autoCleanup: true,
   soundEnabled: true,

@@ -146,7 +146,6 @@ export function useOcr(videoRef: React.RefObject<HTMLVideoElement | null>) {
   // clear the pending badge if VLM couldn't read the crop.
   useEffect(() => {
     setOnnxResultCallback((frameId, correctedLines) => {
-      const s = settingsRef.current;
       const store = useAppStore.getState();
       const now = Date.now();
 
@@ -163,13 +162,13 @@ export function useOcr(videoRef: React.RefObject<HTMLVideoElement | null>) {
       vlmProcessedKeysRef.current.add(key);
 
       // Extract the first valid (timestamped) line from VLM output
-      const messages = combineLines(correctedLines, s);
+      const messages = combineLines(correctedLines);
       const validMsg = messages.find((m) => m.rawTimestamp?.includes(':'));
 
       const liveIdx = useAppStore.getState().consoleLines.indexOf(existing.lineRef);
 
       if (validMsg) {
-        const mvp = analyzeMvp(validMsg.text, s);
+        const mvp = analyzeMvp(validMsg.text);
         if (liveIdx >= 0) {
           store.updateConsoleLine(liveIdx, {
             text: validMsg.text,
@@ -307,24 +306,24 @@ export function useOcr(videoRef: React.RefObject<HTMLVideoElement | null>) {
         rawFrame.data,
         rawFrame.width,
         rawFrame.height,
-        s.useUpscale,
-        s.useMultiFilter,
+        true,
+        true,
       );
 
       // Generation guard
       if (genRef.current !== myGen) return;
 
       // 3. Combine lines + analyze MVP
-      const v2Messages = combineLines(v2Lines, s);
-      let results = v2Messages.map((m) => ({ msg: m, mvp: analyzeMvp(m.text, s) }));
+      const v2Messages = combineLines(v2Lines);
+      let results = v2Messages.map((m) => ({ msg: m, mvp: analyzeMvp(m.text) }));
 
       let usedFilter: 'v1' | 'v2' | 'raw' = 'v2';
 
       // 4. Merge Raw results — catch colored chat text (orange item drops, green GL messages)
       //    that V2's thresholding misses. Dedup handles overlaps.
       if (rawLines.length > 0) {
-        const rawMessages = combineLines(rawLines, s);
-        const rawResults = rawMessages.map((m) => ({ msg: m, mvp: analyzeMvp(m.text, s) }));
+        const rawMessages = combineLines(rawLines);
+        const rawResults = rawMessages.map((m) => ({ msg: m, mvp: analyzeMvp(m.text) }));
         results = results.concat(rawResults);
         usedFilter = 'raw';
       }
@@ -515,7 +514,7 @@ export function useOcr(videoRef: React.RefObject<HTMLVideoElement | null>) {
             .filter((l) => l.bbox && l.text.includes(msg.rawTimestamp!))
             .sort((a, b) => b.confidence - a.confidence)[0];
           if (!matchingLine?.bbox) continue;
-          const rawBbox = mapBboxToRaw(matchingLine.bbox, s.useUpscale);
+          const rawBbox = mapBboxToRaw(matchingLine.bbox, true);
           const msgRect = unionRect([rawBbox], 6, rawFrame.width, rawFrame.height);
           if (!msgRect) continue;
 

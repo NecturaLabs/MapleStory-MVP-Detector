@@ -4,21 +4,18 @@
  */
 
 import { useCallback } from 'react';
-import useAppStore from '../store/appStore.ts';
 import { combineLines, analyzeMvp } from '../services/chatParserService.ts';
 import type { OcrLine } from '../services/ocrService.ts';
 
 export function useChatParser() {
-  const settings = useAppStore((s) => s.settings);
-
   const parseLines = useCallback(
-    (ocrLines: OcrLine[]) => combineLines(ocrLines, settings),
-    [settings]
+    (ocrLines: OcrLine[]) => combineLines(ocrLines),
+    []
   );
 
   const analyzeMessage = useCallback(
-    (text: string) => analyzeMvp(text, settings),
-    [settings]
+    (text: string) => analyzeMvp(text),
+    []
   );
 
   return { parseLines, analyzeMessage };

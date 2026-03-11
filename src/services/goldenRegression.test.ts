@@ -18,7 +18,6 @@ import { createWorker } from 'tesseract.js';
 import type Tesseract from 'tesseract.js';
 import { applyFiltersV2, applyFiltersV1 } from './imageFilters.ts';
 import { combineLines, analyzeMvp } from './chatParserService.ts';
-import type { AppSettings } from '../utils/persistence.ts';
 
 // ---------------------------------------------------------------------------
 // Polyfill ImageData for Node (Vitest runs in Node, not browser)
@@ -62,28 +61,6 @@ interface GroundTruthEntry {
 }
 
 type GroundTruth = Record<string, GroundTruthEntry>;
-
-const SETTINGS: AppSettings = {
-  pollingInterval: 2000,
-  useMultiFilter: true,
-  useUpscale: true,
-  searchKeywords: ['mvp', 'alicias blessing', 'certified wellness tonic'],
-  exclusionKeywords: ['superpower', 'exp coupon', 'any mvp', 'pls mvp', 'plz mvp', 'please mvp'],
-  replacementKeywords: ['mvp red', 'be mvp', 'x1 coupon', 'effect x1'],
-  maxChannel: 40,
-  minConfidence: 30,
-  maxMessages: 100,
-  autoCleanup: true,
-  soundEnabled: true,
-  soundVolume: 0.5,
-  soundTone: 'sine',
-  discordEnabled: false,
-  discordWebhookUrl: '',
-  discordRoleId: '',
-  vlmEnabled: false,
-  showMvpOnly: false,
-  chatRegion: null,
-};
 
 // ---------------------------------------------------------------------------
 // TIFF decode helper
@@ -266,14 +243,14 @@ describe.skipIf(!HAS_FIXTURES)('Golden Regression Tests', () => {
         );
 
         // Combine lines from both pipelines (mimics multi-filter mode)
-        const v2Combined = combineLines(v2Lines, SETTINGS);
-        const v1Combined = combineLines(v1Lines, SETTINGS);
+        const v2Combined = combineLines(v2Lines);
+        const v1Combined = combineLines(v1Lines);
         const allCombined = [...v2Combined, ...v1Combined];
 
         // Check for MVP keyword presence in any combined message
         const mvpResults = allCombined.map(m => ({
           text: m.text,
-          mvp: analyzeMvp(m.text, SETTINGS),
+          mvp: analyzeMvp(m.text),
         }));
 
         const hasMvpKeyword = mvpResults.some(r => r.mvp.hasMvpKeyword);

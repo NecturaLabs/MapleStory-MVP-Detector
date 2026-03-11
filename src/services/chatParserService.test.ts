@@ -11,32 +11,6 @@
 
 import { describe, it, expect } from 'vitest';
 import { analyzeMvp, combineLines } from './chatParserService.ts';
-import type { AppSettings } from '../utils/persistence.ts';
-
-// ---------------------------------------------------------------------------
-// Settings matching appsettings.json / DEFAULT_SETTINGS
-// ---------------------------------------------------------------------------
-const SETTINGS: AppSettings = {
-  pollingInterval: 2000,
-  useMultiFilter: true,
-  useUpscale: true,
-  searchKeywords: ['mvp', 'alicias blessing', 'certified wellness tonic'],
-  exclusionKeywords: ['superpower', 'exp coupon', 'any mvp', 'pls mvp', 'plz mvp', 'please mvp'],
-  replacementKeywords: ['mvp red', 'be mvp', 'x1 coupon', 'effect x1'],
-  maxChannel: 40,
-  minConfidence: 30,
-  maxMessages: 100,
-  autoCleanup: true,
-  soundEnabled: true,
-  soundVolume: 0.5,
-  soundTone: 'sine',
-  discordEnabled: false,
-  discordWebhookUrl: '',
-  discordRoleId: '',
-  vlmEnabled: false,
-  showMvpOnly: false,
-  chatRegion: null,
-};
 
 // ---------------------------------------------------------------------------
 // Test data — direct port of _testMessages
@@ -165,7 +139,7 @@ const TEST_MESSAGES_WITH_TIME: Array<{ message: string; expectedTime: Date }> = 
 
 /** Thin wrapper — same signature as C# GetMvpAnnouncementDetails(new ChatMessage(text)) */
 function getDetails(message: string) {
-  return analyzeMvp(message, SETTINGS);
+  return analyzeMvp(message);
 }
 
 // ---------------------------------------------------------------------------
@@ -186,7 +160,7 @@ describe('EnsureMvpAnnouncementsCanBeExtractedFromTestMessages', () => {
 
   it('all MVP-positive messages survive combineLines → analyzeMvp pipeline', () => {
     const ocrLines = mvpMessages.map((text) => ({ text, confidence: 95 }));
-    const combined = combineLines(ocrLines, SETTINGS);
+    const combined = combineLines(ocrLines);
     for (const msg of combined) {
       const result = getDetails(msg.text);
       expect(result.isValid, `pipeline failed for: ${msg.text}`).toBe(true);

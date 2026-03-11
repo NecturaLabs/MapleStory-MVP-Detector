@@ -17,7 +17,16 @@ import {
 } from '../utils/regexPatterns.ts';
 import type { OcrLine } from './ocrService.ts';
 import type { LocationMatch } from './dbService.ts';
-import type { AppSettings } from '../utils/persistence.ts';
+
+// ---------------------------------------------------------------------------
+// Pipeline constants (not user-configurable — no UI controls)
+// ---------------------------------------------------------------------------
+
+const MIN_CONFIDENCE = 30;
+const MAX_CHANNEL = 40;
+const SEARCH_KEYWORDS = ['mvp', 'alicias blessing', 'certified wellness tonic'] as const;
+const EXCLUSION_KEYWORDS = ['superpower', 'exp coupon', 'any mvp', 'pls mvp', 'plz mvp', 'please mvp'] as const;
+const REPLACEMENT_KEYWORDS = ['mvp red', 'be mvp', 'x1 coupon', 'effect x1'] as const;
 
 export interface CombinedMessage {
   text: string;
@@ -63,8 +72,8 @@ export function stripGuildMedals(text: string): string {
 // combineLines — port of CombineMessageLinesIntoMessages
 // ---------------------------------------------------------------------------
 
-export function combineLines(ocrLines: OcrLine[], settings: Pick<AppSettings, 'minConfidence'>): CombinedMessage[] {
-  const { minConfidence = 30 } = settings;
+export function combineLines(ocrLines: OcrLine[]): CombinedMessage[] {
+  const minConfidence = MIN_CONFIDENCE;
   const messages: CombinedMessage[] = [];
   let buffer: CombinedMessage | null = null;
 
@@ -134,12 +143,10 @@ export function combineLines(ocrLines: OcrLine[], settings: Pick<AppSettings, 'm
 // analyzeMvp — port of GetMvpAnnouncementDetails
 // ---------------------------------------------------------------------------
 
-export function analyzeMvp(messageText: string, settings: AppSettings): MvpAnalysis {
-  const {
-    searchKeywords = ['mvp', 'alicias blessing', 'certified wellness tonic'],
-    exclusionKeywords = ['superpower', 'exp coupon', 'any mvp', 'pls mvp', 'plz mvp', 'please mvp'],
-    replacementKeywords = ['mvp red', 'be mvp', 'x1 coupon', 'effect x1'],
-  } = settings;
+export function analyzeMvp(messageText: string): MvpAnalysis {
+  const searchKeywords = SEARCH_KEYWORDS;
+  const exclusionKeywords = EXCLUSION_KEYWORDS;
+  const replacementKeywords = REPLACEMENT_KEYWORDS;
 
   // Step 1: Extract leading timestamp (C# rejects messages without one)
   const tsRe = cloneRegex(TIMESTAMP);
@@ -192,7 +199,7 @@ export function analyzeMvp(messageText: string, settings: AppSettings): MvpAnaly
   const hasMvpKeyword = searchKeywords.some((kw) => lowerFixed2.includes(kw.toLowerCase()));
 
   // Step 8: Extract channel and time — pass postedAt as base (mirrors C# GetMvpChannelAndTime)
-  const { channel, willBeUsedAt } = extractChannelAndTime(fixedText, postedAt, settings);
+  const { channel, willBeUsedAt } = extractChannelAndTime(fixedText, postedAt);
 
   // Step 9: Get location
   const location = getLocation(fixedText);
@@ -221,9 +228,8 @@ export function analyzeMvp(messageText: string, settings: AppSettings): MvpAnaly
 export function extractChannelAndTime(
   text: string,
   postedAt: Date,
-  settings: Pick<AppSettings, 'maxChannel'>
 ): { channel: number | null; willBeUsedAt: Date | null } {
-  const { maxChannel = 40 } = settings;
+  const maxChannel = MAX_CHANNEL;
 
   // --- Channel ---
   let channel: number | null = null;

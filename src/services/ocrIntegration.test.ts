@@ -18,7 +18,6 @@ import { createWorker } from 'tesseract.js';
 import type Tesseract from 'tesseract.js';
 import { applyFiltersV2, applyFiltersV1 } from './imageFilters.ts';
 import { combineLines, analyzeMvp } from './chatParserService.ts';
-import type { AppSettings } from '../utils/persistence.ts';
 
 // ---------------------------------------------------------------------------
 // Polyfill ImageData for Node (Vitest runs in Node, not browser)
@@ -51,28 +50,6 @@ if (typeof globalThis.ImageData === 'undefined') {
 
 const TIFF_PATH = process.env.TEST_TIFF_PATH ?? './TEST-SUBJECT.tiff';
 const TIFF_EXISTS = existsSync(TIFF_PATH);
-
-const SETTINGS: AppSettings = {
-  pollingInterval: 2000,
-  useMultiFilter: true,
-  useUpscale: true,
-  searchKeywords: ['mvp', 'alicias blessing', 'certified wellness tonic'],
-  exclusionKeywords: ['superpower', 'exp coupon', 'any mvp', 'pls mvp', 'plz mvp', 'please mvp'],
-  replacementKeywords: ['mvp red', 'be mvp', 'x1 coupon', 'effect x1'],
-  maxChannel: 40,
-  minConfidence: 30,
-  maxMessages: 100,
-  autoCleanup: true,
-  soundEnabled: true,
-  soundVolume: 0.5,
-  soundTone: 'sine',
-  discordEnabled: false,
-  discordWebhookUrl: '',
-  discordRoleId: '',
-  vlmEnabled: false,
-  showMvpOnly: false,
-  chatRegion: null,
-};
 
 // ---------------------------------------------------------------------------
 // TIFF decoding helper (using utif in Node)
@@ -231,7 +208,7 @@ describe.skipIf(!TIFF_EXISTS)('OCR Integration — TEST-SUBJECT.tiff', () => {
       filtered.height,
     );
 
-    const combined = combineLines(lines, SETTINGS);
+    const combined = combineLines(lines);
     console.log(`[TEST] V2 combineLines: ${combined.length} messages`);
     for (const m of combined) {
       console.log(`  ts=${m.rawTimestamp} conf=${Math.round(m.confidence)} — ${m.text}`);
@@ -255,10 +232,10 @@ describe.skipIf(!TIFF_EXISTS)('OCR Integration — TEST-SUBJECT.tiff', () => {
       filtered.height,
     );
 
-    const combined = combineLines(lines, SETTINGS);
+    const combined = combineLines(lines);
     const mvpResults = combined.map((m) => ({
       text: m.text,
-      mvp: analyzeMvp(m.text, SETTINGS),
+      mvp: analyzeMvp(m.text),
     }));
 
     console.log(`[TEST] Full V2 pipeline MVP analysis:`);
@@ -288,10 +265,10 @@ describe.skipIf(!TIFF_EXISTS)('OCR Integration — TEST-SUBJECT.tiff', () => {
       filtered.height,
     );
 
-    const combined = combineLines(lines, SETTINGS);
+    const combined = combineLines(lines);
     const mvpResults = combined.map((m) => ({
       text: m.text,
-      mvp: analyzeMvp(m.text, SETTINGS),
+      mvp: analyzeMvp(m.text),
     }));
 
     console.log(`[TEST] Full V1 pipeline MVP analysis:`);

@@ -11,6 +11,7 @@
 
 import React, { useRef, useEffect, useCallback, useState } from 'react';
 import useAppStore from '../store/appStore.ts';
+import { saveSettings } from '../utils/persistence.ts';
 import type { ConsoleLine } from '../store/appStore.ts';
 
 function formatUsedAt(ms: number): string {
@@ -94,6 +95,7 @@ export default function ConsolePanel() {
   const currentFilter = useAppStore((s) => s.currentFilter);
   const isCapturing   = useAppStore((s) => s.isCapturing);
   const showMvpOnly   = useAppStore((s) => s.settings.showMvpOnly);
+  const updateSettings = useAppStore((s) => s.updateSettings);
   const lineCount = useAppStore((s) => s.consoleLines.length);
   const downloadChatLog = useAppStore((s) => s.downloadChatLog);
 
@@ -155,6 +157,19 @@ export default function ConsolePanel() {
             {currentFilter.toUpperCase()}
           </span>
         )}
+
+        <button
+          className={`btn btn--sm${showMvpOnly ? ' btn--active' : ' btn--ghost'}`}
+          onClick={() => {
+            const next = !showMvpOnly;
+            updateSettings({ showMvpOnly: next });
+            saveSettings({ ...useAppStore.getState().settings, showMvpOnly: next });
+          }}
+          aria-label={showMvpOnly ? 'Showing MVP only — click to show all' : 'Show MVP only'}
+          title={showMvpOnly ? 'Show all messages' : 'Show MVP messages only'}
+        >
+          MVP Only
+        </button>
 
         <button
           className="btn btn--ghost btn--sm"

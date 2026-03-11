@@ -265,6 +265,13 @@ img, video {
   border-color: var(--c-border-2);
 }
 
+.btn--active {
+  background: var(--c-gold);
+  color: #000;
+  border-color: var(--c-gold);
+}
+.btn--active:hover { background: #e0a820; border-color: #e0a820; }
+
 .btn--danger {
   background: transparent;
   color: var(--c-red);
